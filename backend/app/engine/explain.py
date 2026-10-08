@@ -4,7 +4,7 @@ from collections import Counter
 
 from app.core.clock import fmt_clock
 from app.domain.enums import AircraftStatus, ChangeKind, MissionOrigin, RejectReason, WeatherCondition
-from app.domain.models import Cop, Mission
+from app.domain.models import Cop, Crew, Mission
 from app.domain.plan import (
     CandidateView,
     Change,
@@ -66,6 +66,15 @@ def _why_released(cop: Cop, tail: str, now_tasked: dict[str, Mission]) -> str:
     return f"{tail} released: a better-scoring option was found"
 
 
+def _why_crew_moved(crew: Crew, crew_now: dict[str, Mission]) -> str:
+    if not crew.available:
+        return f"{crew.callsign}: {crew.status_note or 'unavailable'}"
+    if crew.id in crew_now:
+        m = crew_now[crew.id]
+        return f"{crew.callsign} moved to {m.id} {m.name} to cover a crew shortfall"
+    return f"{crew.callsign} stood down to stay within duty limits"
+
+
 def diff_plans(
     cop: Cop, previous: list[Package], proposed: list[Package], full: CandidateSet
 ) -> list[Change]:
@@ -73,6 +82,7 @@ def diff_plans(
     before = {p.mission_id: p for p in previous}
     after = {p.mission_id: p for p in proposed}
     now_tasked = {s.aircraft_tail: missions[p.mission_id] for p in proposed for s in p.sorties}
+    crew_now = {s.crew_id: missions[p.mission_id] for p in proposed for s in p.sorties}
     changes: list[Change] = []
     for mid in sorted(set(before) | set(after)):
         m = missions.get(mid)
@@ -121,14 +131,8 @@ def diff_plans(
                     )
                 )
             elif {s.crew_id for s in b.sorties} != {s.crew_id for s in a.sorties}:
-                gone = [
-                    c
-                    for c in cop.crews
-                    if c.id in {s.crew_id for s in b.sorties} - {s.crew_id for s in a.sorties}
-                ]
-                reason = "; ".join(
-                    f"{c.callsign}: {c.status_note or 'reassigned to balance crew duty'}" for c in gone
-                )
+                gone_ids = {s.crew_id for s in b.sorties} - {s.crew_id for s in a.sorties}
+                reason = "; ".join(_why_crew_moved(c, crew_now) for c in cop.crews if c.id in gone_ids)
                 changes.append(
                     Change(
                         mission_id=mid,

@@ -21,7 +21,7 @@ The previous plan is also given as a solution hint, so the search starts from it
 
 import time
 from collections import defaultdict
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
 from ortools.sat.python import cp_model
 
@@ -29,11 +29,13 @@ from app.core.constants import (
     AIRCRAFT_LOSS_COST,
     CANDIDATES_PER_SLOT,
     CHANGE_COST,
+    CREW_CHANGE_COST,
     CREW_MIN_REST_MIN,
     LOADOUTS_PER_PAIR,
     OBJECTIVE_SCALE,
     SOLVER_PROBING_LEVEL,
     SOLVER_RANDOM_SEED,
+    SOLVER_WALL_CAP_S,
     SOLVER_WORKERS,
 )
 from app.core.exceptions import SolverError
@@ -66,22 +68,35 @@ class SolveResult:
     objective: float
 
 
+@dataclass(frozen=True)
+class PreviousPlan:
+    """The open part of the plan being retasked. Empty when planning from scratch."""
+
+    pairs: frozenset[tuple[str, str]] = frozenset()  # (aircraft tail, mission id)
+    crews: dict[tuple[str, str], str] = field(default_factory=dict)  # (mission, tail) -> crew
+
+    @property
+    def crew_pairs(self) -> set[tuple[str, str]]:
+        return {(crew, mission) for (mission, _), crew in self.crews.items()}
+
+
 def candidate_score(c: Candidate, w: CoaWeights) -> float:
     """Net priority points for flying one candidate, before plan-stability terms."""
     return c.value - w.risk * c.risk * AIRCRAFT_LOSS_COST - w.scarce * c.scarcity_cost
 
 
-def plan_objective(
-    assignments: list[Assignment], weights: CoaWeights, previous_pairs: set[tuple[str, str]]
-) -> float:
+def plan_objective(assignments: list[Assignment], weights: CoaWeights, previous: PreviousPlan) -> float:
     """The solver's objective evaluated for a given plan, in priority points."""
     total = 0.0
+    crew_pairs = previous.crew_pairs
     for a in assignments:
         c = a.candidate
         total += candidate_score(c, weights)
-        if previous_pairs:
-            keep = (c.tail, c.mission_id) in previous_pairs
+        if previous.pairs:
+            keep = (c.tail, c.mission_id) in previous.pairs
             total += weights.change * CHANGE_COST * (1 if keep else -1)
+        if (a.crew_id, c.mission_id) in crew_pairs:
+            total += weights.change * CREW_CHANGE_COST
     return total
 
 
@@ -117,9 +132,9 @@ def solve(
     cset: CandidateSet,
     commitments: Commitments,
     weights: CoaWeights,
-    previous_pairs: set[tuple[str, str]],
+    previous: PreviousPlan,
     hint: list[Assignment],
-    time_limit_s: float,
+    deterministic_budget: float,
 ) -> SolveResult:
     model = cp_model.CpModel()
     started = time.perf_counter()
@@ -154,8 +169,7 @@ def solve(
         # Crews: per (base, type) group, crews assigned must equal aircraft flying.
         for (base_id, type_code), group in groups.items():
             crew_ids = cset.crews[m.id].get((base_id, type_code), [])
-            pre = max(c.pre_min for c in group)
-            duration = max(c.duration_min for c in group)
+            pre, duration = cset.crew_windows[(m.id, base_id, type_code)]
             zs = []
             for k in crew_ids:
                 if cset.crew_duty_left[k] < duration:
@@ -193,9 +207,11 @@ def solve(
 
     terms = []
     for c in cset.candidates:
-        keep = (c.tail, c.mission_id) in previous_pairs
-        stability = weights.change * CHANGE_COST * (1 if keep else -1) if previous_pairs else 0.0
+        keep = (c.tail, c.mission_id) in previous.pairs
+        stability = weights.change * CHANGE_COST * (1 if keep else -1) if previous.pairs else 0.0
         terms.append(x[c.idx] * round(OBJECTIVE_SCALE * (candidate_score(c, weights) + stability)))
+    crew_bonus = round(OBJECTIVE_SCALE * weights.change * CREW_CHANGE_COST)
+    terms += [var * crew_bonus for key, var in z.items() if key in previous.crew_pairs]
     model.maximize(sum(terms))
 
     # Start the search from the greedy plan: a complete, feasible solution.
@@ -214,7 +230,8 @@ def solve(
         model.add_hint(var, 1 if key in hinted_crews else 0)
 
     solver = cp_model.CpSolver()
-    solver.parameters.max_time_in_seconds = time_limit_s
+    solver.parameters.max_deterministic_time = deterministic_budget
+    solver.parameters.max_time_in_seconds = SOLVER_WALL_CAP_S
     solver.parameters.num_workers = SOLVER_WORKERS
     solver.parameters.random_seed = SOLVER_RANDOM_SEED
     solver.parameters.cp_model_probing_level = SOLVER_PROBING_LEVEL
@@ -229,7 +246,7 @@ def solve(
             assignments=hint,
             status="FALLBACK_GREEDY",
             solve_ms=solve_ms,
-            objective=plan_objective(hint, weights, previous_pairs),
+            objective=plan_objective(hint, weights, previous),
         )
     if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
         raise SolverError(f"Optimiser returned {status_name}")
@@ -245,10 +262,20 @@ def solve(
             if mid == m.id and solver.value(var):
                 crew_key = next(key for key, ids in cset.crews[m.id].items() if k in ids)
                 free_crews[crew_key].append(k)
+        # Pair each aircraft with its previous crew where that crew is still selected.
+        crew_for: dict[str, str] = {}
         for c in chosen:
-            crew_id = sorted(free_crews[(c.base_id, c.type_code)]).pop(0)
-            free_crews[(c.base_id, c.type_code)].remove(crew_id)
-            assignments.append(Assignment(candidate=c, crew_id=crew_id, tot_min=t))
+            preferred = previous.crews.get((m.id, c.tail))
+            pool = free_crews[(c.base_id, c.type_code)]
+            if preferred in pool:
+                crew_for[c.tail] = preferred
+                pool.remove(preferred)
+        for c in chosen:
+            if c.tail not in crew_for:
+                pool = sorted(free_crews[(c.base_id, c.type_code)])
+                crew_for[c.tail] = pool[0]
+                free_crews[(c.base_id, c.type_code)].remove(pool[0])
+            assignments.append(Assignment(candidate=c, crew_id=crew_for[c.tail], tot_min=t))
 
     solve_ms = round((time.perf_counter() - started) * 1000)
     logger.info(

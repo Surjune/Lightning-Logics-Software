@@ -77,10 +77,17 @@ AIRCRAFT_LOSS_COST: Final = 60.0
 # Changing one aircraft's tasking during retasking costs 6 priority points before COA
 # weighting: enough to stop churn for marginal gains, small against any real mission.
 CHANGE_COST: Final = 6.0
-# Per-COA budget. Measured on the demo scenario (4 cores): a lone solve is within 1% of
-# its 8-second objective after 2 seconds. COAs run one after another, not in parallel,
-# because concurrent solves starve each other's worker threads.
-SOLVER_TIME_LIMIT_S: Final = 2.0
+# Keeping the same crew on a retained package earns 2 points: crews in a squadron are
+# interchangeable to the solver, and without this a retask reshuffles them for nothing.
+CREW_CHANGE_COST: Final = 2.0
+# Per-COA search budget in CP-SAT deterministic time units, so every run does the same
+# amount of search whatever else the host is doing. 0.3 units is ~2 s on an idle 4-core
+# laptop and reaches the same objective as an 8 s wall-clock run on the demo scenario.
+# COAs run one after another: concurrent solves starve each other's worker threads.
+SOLVER_DETERMINISTIC_BUDGET: Final = 0.3
+# Wall-clock safety cap per COA for a heavily loaded host; past it the best plan found
+# so far is used (or the greedy starting plan if none was reported yet).
+SOLVER_WALL_CAP_S: Final = 4.0
 # Presolve probing costs ~1.5 s on this model size for no measurable gain; level 1
 # keeps the cheap probing passes only.
 SOLVER_PROBING_LEVEL: Final = 1
@@ -99,6 +106,9 @@ SCENARIO_SEED: Final = 26250
 COA_BALANCED: Final = (1.0, 1.0, 1.0)
 COA_MAX_EFFECT: Final = (0.4, 0.3, 0.25)
 COA_MIN_RISK: Final = (3.0, 1.0, 1.0)
+# Retask re-plan: balanced, but each changed aircraft tasking costs twice as much, so
+# assets are pulled from other packages only for a clear gain.
+COA_BALANCED_REPLAN: Final = (1.0, 1.0, 2.0)
 
 # --- Data fusion -------------------------------------------------------------------
 # Two SAM reports within this distance are treated as the same site.

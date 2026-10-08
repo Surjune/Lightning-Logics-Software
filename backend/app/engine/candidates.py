@@ -106,6 +106,10 @@ class CandidateSet:
     stock_left: dict[tuple[str, str], int]
     tanker_capacity: int
     rejections: dict[str, dict[RejectReason, tuple[int, str]]]
+    # (mission, base, type) -> (minutes before TOT, duration): the crew time window
+    # reserved for any aircraft of that group. Computed once over every candidate so it
+    # is identical across COAs and solves, whatever each one prunes.
+    crew_windows: dict[tuple[str, str, str], tuple[int, int]]
 
     def reject_count(self, mission_id: str) -> int:
         return sum(n for n, _ in self.rejections.get(mission_id, {}).values())
@@ -315,6 +319,12 @@ def generate_candidates(
                 reason, example = max(misses, key=lambda r: _LOADOUT_STAGE.index(r[0]))
                 reject(m.id, reason, example)
 
+    crew_windows: dict[tuple[str, str, str], tuple[int, int]] = {}
+    for c in candidates:
+        key = (c.mission_id, c.base_id, c.type_code)
+        pre, dur = crew_windows.get(key, (0, 0))
+        crew_windows[key] = (max(pre, c.pre_min), max(dur, c.duration_min))
+
     return CandidateSet(
         candidates=candidates,
         by_mission=by_mission,
@@ -325,4 +335,5 @@ def generate_candidates(
         stock_left=stock_left,
         tanker_capacity=tanker_capacity,
         rejections=rejections,
+        crew_windows=crew_windows,
     )

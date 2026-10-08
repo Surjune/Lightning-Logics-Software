@@ -1,16 +1,17 @@
 """Plan generation, dynamic retasking and commander approval."""
 
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from app.core.constants import (
     AIRCRAFT_LOSS_COST,
     ARMING_LEAD_TIME_MIN,
     CHANGE_COST,
     COA_BALANCED,
+    COA_BALANCED_REPLAN,
     COA_MAX_EFFECT,
     COA_MIN_RISK,
-    SOLVER_TIME_LIMIT_S,
+    SOLVER_DETERMINISTIC_BUDGET,
 )
 from app.core.exceptions import ConflictError, NotFoundError
 from app.core.logging import get_logger, log_fields
@@ -19,11 +20,19 @@ from app.domain.models import Cop, Mission
 from app.domain.plan import Coa, MissionExplanation, Package, Plan, PlanKpis, Proposal, UnassignedMission
 from app.engine import prediction
 from app.engine.assemble import to_packages
-from app.engine.baseline import PreviousPackage, greedy_plan
+from app.engine.baseline import PreviousPackage, greedy_plan, keep_valid_packages
 from app.engine.candidates import CandidateSet, Commitments, commitments_from, generate_candidates
 from app.engine.explain import diff_plans, explain_mission, tasking_changes, unassigned
 from app.engine.kpis import compute_kpis
-from app.engine.optimizer import Assignment, CoaWeights, SolveResult, plan_objective, prune, solve
+from app.engine.optimizer import (
+    Assignment,
+    CoaWeights,
+    PreviousPlan,
+    SolveResult,
+    plan_objective,
+    prune,
+    solve,
+)
 from app.engine.validator import validate
 from app.services.state import OpsState
 
@@ -36,27 +45,54 @@ class CoaProfile:
     name: str
     rationale: str
     weights: CoaWeights
+    # Repair-only COAs keep every still-valid package exactly as planned.
+    repair_only: bool = False
 
 
-PROFILES = [
+MAX_EFFECT = CoaProfile(
+    "B",
+    "Maximum effect",
+    "Accepts more risk, spends scarce munitions and reshuffles the plan to cover as much "
+    "priority as possible.",
+    CoaWeights(*COA_MAX_EFFECT),
+)
+MIN_RISK = CoaProfile(
+    "C",
+    "Minimum risk",
+    "Avoids SAM exposure, preferring standoff weapons and dropping tasks that cannot be flown safely.",
+    CoaWeights(*COA_MIN_RISK),
+)
+INITIAL_PROFILES = [
     CoaProfile(
         "A",
         "Balanced",
         "Commander's default weighting of effect, risk, munitions and plan stability.",
         CoaWeights(*COA_BALANCED),
     ),
+    MAX_EFFECT,
+    MIN_RISK,
+]
+RETASK_PROFILES = [
+    CoaProfile(
+        "A",
+        "Minimal change",
+        "Keeps every package that is still valid exactly as planned; re-plans only what the change "
+        "broke and any task that spare assets can now cover.",
+        CoaWeights(*COA_BALANCED),
+        repair_only=True,
+    ),
     CoaProfile(
         "B",
-        "Maximum effect",
-        "Accepts more risk, spends scarce munitions and churns the plan "
-        "to cover as much priority as possible.",
-        CoaWeights(*COA_MAX_EFFECT),
+        "Balanced re-plan",
+        "Re-optimises the open plan, moving assets between packages only where the gain clearly "
+        "outweighs the disruption.",
+        CoaWeights(*COA_BALANCED_REPLAN),
     ),
     CoaProfile(
         "C",
-        "Minimum risk",
-        "Avoids SAM exposure, preferring standoff weapons and dropping tasks that cannot be flown safely.",
-        CoaWeights(*COA_MIN_RISK),
+        "Maximum effect",
+        "Re-optimises freely for the most priority covered, accepting more risk and more changes.",
+        CoaWeights(*COA_MAX_EFFECT),
     ),
 ]
 
@@ -96,8 +132,8 @@ class _Context:
     open_previous: list[Package]
     commitments: Commitments
     full: CandidateSet
-    previous_pairs: set[tuple[str, str]]
-    previous: list[PreviousPackage]
+    stability: PreviousPlan
+    previous_packages: list[PreviousPackage]
 
 
 class PlanningService:
@@ -120,25 +156,42 @@ class PlanningService:
             open_previous=open_previous,
             commitments=commitments,
             full=full,
-            previous_pairs={(s.aircraft_tail, p.mission_id) for p in open_previous for s in p.sorties},
-            previous=[
-                PreviousPackage(p.mission_id, p.tot_min, {s.aircraft_tail: s.crew_id for s in p.sorties})
+            stability=PreviousPlan(
+                pairs=frozenset((s.aircraft_tail, p.mission_id) for p in open_previous for s in p.sorties),
+                crews={(p.mission_id, s.aircraft_tail): s.crew_id for p in open_previous for s in p.sorties},
+            ),
+            previous_packages=[
+                PreviousPackage(
+                    mission_id=p.mission_id,
+                    tot_min=p.tot_min,
+                    crew_by_tail={s.aircraft_tail: s.crew_id for s in p.sorties},
+                    weapon_by_tail={s.aircraft_tail: s.weapon_code for s in p.sorties},
+                )
                 for p in open_previous
             ],
         )
 
     def _search(self, ctx: _Context, profile: CoaProfile) -> SolveResult:
-        cset = prune(ctx.full, ctx.open_missions, profile.weights, ctx.previous_pairs)
-        hint = greedy_plan(ctx.open_missions, cset, ctx.commitments, profile.weights, ctx.previous)
-        return solve(
-            ctx.open_missions,
-            cset,
-            ctx.commitments,
-            profile.weights,
-            ctx.previous_pairs,
+        w = profile.weights
+        cset = prune(ctx.full, ctx.open_missions, w, set(ctx.stability.pairs))
+        if not profile.repair_only:
+            hint = greedy_plan(ctx.open_missions, cset, ctx.commitments, w, ctx.previous_packages)
+            return solve(
+                ctx.open_missions, cset, ctx.commitments, w, ctx.stability, hint, SOLVER_DETERMINISTIC_BUDGET
+            )
+        repair = keep_valid_packages(ctx.open_missions, cset, ctx.commitments, w, ctx.previous_packages)
+        hint = greedy_plan(repair.missions, repair.cset, repair.commitments, w, ctx.previous_packages)
+        result = solve(
+            repair.missions,
+            repair.cset,
+            repair.commitments,
+            w,
+            ctx.stability,
             hint,
-            SOLVER_TIME_LIMIT_S,
+            SOLVER_DETERMINISTIC_BUDGET,
         )
+        plan = repair.kept + result.assignments
+        return replace(result, assignments=plan, objective=plan_objective(plan, w, ctx.stability))
 
     def _build_coa(
         self, ctx: _Context, profile: CoaProfile, plan: list[Assignment], result: SolveResult
@@ -170,24 +223,27 @@ class PlanningService:
     def generate(self, trigger: str) -> Proposal:
         with self.state.lock:
             ctx = self._context()
-            results = [self._search(ctx, profile) for profile in PROFILES]
-            # Every search result satisfies the same hard constraints, so each COA keeps
-            # whichever result scores best under its own weights. A COA can then never
-            # be beaten on its own objective by another COA's plan.
+            profiles = RETASK_PROFILES if ctx.open_previous else INITIAL_PROFILES
+            results = [self._search(ctx, profile) for profile in profiles]
+            # Every search result satisfies the same hard constraints, so each full
+            # re-optimisation keeps whichever result scores best under its own weights:
+            # it can then never be beaten on its own objective by another COA's plan.
             coas = []
-            for profile, own in zip(PROFILES, results, strict=True):
-                best = max(
-                    results, key=lambda r: plan_objective(r.assignments, profile.weights, ctx.previous_pairs)
-                )
+            for profile, own in zip(profiles, results, strict=True):
+                best = own
+                if not profile.repair_only:
+                    best = max(
+                        results, key=lambda r: plan_objective(r.assignments, profile.weights, ctx.stability)
+                    )
                 coas.append(self._build_coa(ctx, profile, best.assignments, own))
-            balanced = PROFILES[0].weights
+            balanced = INITIAL_PROFILES[0].weights
             baseline_packages = ctx.frozen + to_packages(
                 greedy_plan(
                     ctx.open_missions,
-                    prune(ctx.full, ctx.open_missions, balanced, ctx.previous_pairs),
+                    prune(ctx.full, ctx.open_missions, balanced, set(ctx.stability.pairs)),
                     ctx.commitments,
                     balanced,
-                    ctx.previous,
+                    ctx.previous_packages,
                 )
             )
             baseline_kpis = compute_kpis(
@@ -204,7 +260,7 @@ class PlanningService:
             )
             self.state.proposal = proposal
             self.state.last_candidates = ctx.full
-            self.state.proposal_weights = {p.id: p.weights for p in PROFILES}
+            self.state.proposal_weights = {p.id: p.weights for p in profiles}
             self.state.audit.record(
                 ctx.cop.clock_min,
                 "system",
@@ -242,7 +298,7 @@ class PlanningService:
                 approved_at_min=self.state.cop.clock_min,
                 packages=coa.packages,
             )
-            self.state.plan_weights = self.state.proposal_weights.get(coa_id, PROFILES[0].weights)
+            self.state.plan_weights = self.state.proposal_weights.get(coa_id, INITIAL_PROFILES[0].weights)
             self.state.proposal = None
             self.state.audit.record(
                 self.state.cop.clock_min,

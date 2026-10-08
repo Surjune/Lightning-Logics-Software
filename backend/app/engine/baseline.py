@@ -9,7 +9,7 @@ per-(base, type) crew interval, so its output is always a valid solver hint.
 """
 
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from app.core.constants import CREW_MIN_REST_MIN, GREEDY_TOT_STEP_MIN
 from app.domain.models import Mission
@@ -22,6 +22,17 @@ class PreviousPackage:
     mission_id: str
     tot_min: int
     crew_by_tail: dict[str, str]
+    weapon_by_tail: dict[str, str]
+
+
+@dataclass(frozen=True)
+class Repair:
+    """Result of keeping every previous package that is still feasible as planned."""
+
+    kept: list[Assignment]
+    missions: list[Mission]  # missions still to plan
+    cset: CandidateSet  # their candidates, with resource ledgers net of the kept packages
+    commitments: Commitments  # busy intervals including the kept packages
 
 
 def _overlaps(busy: list[tuple[int, int]], start: int, end: int) -> bool:
@@ -42,9 +53,6 @@ class _Ledger:
     def try_package(
         self, m: Mission, tot: int, ordered: list[Candidate], preferred_crew: dict[str, str]
     ) -> list[Assignment] | None:
-        groups: dict[tuple[str, str], list[Candidate]] = defaultdict(list)
-        for c in self.cset.by_mission[m.id]:
-            groups[(c.base_id, c.type_code)].append(c)
         chosen: list[Assignment] = []
         tails: set[str] = set()
         crews: set[str] = set()
@@ -63,9 +71,7 @@ class _Ledger:
                 continue
             if c.needs_aar and self.tanker - aar < 1:
                 continue
-            group = groups[(c.base_id, c.type_code)]
-            g_pre = max(g.pre_min for g in group)
-            g_dur = max(g.duration_min for g in group)
+            g_pre, g_dur = self.cset.crew_windows[(m.id, c.base_id, c.type_code)]
             g_start = tot - g_pre
             pool = self.cset.crews[m.id].get((c.base_id, c.type_code), [])
             ordered_pool = sorted(pool, key=lambda k: (k != preferred_crew.get(c.tail), k))
@@ -92,9 +98,6 @@ class _Ledger:
         return None
 
     def commit(self, m: Mission, package: list[Assignment]) -> None:
-        groups: dict[tuple[str, str], list[Candidate]] = defaultdict(list)
-        for c in self.cset.by_mission[m.id]:
-            groups[(c.base_id, c.type_code)].append(c)
         for a in package:
             c = a.candidate
             start = a.tot_min - c.pre_min
@@ -102,14 +105,63 @@ class _Ledger:
             self.aircraft_minutes[c.tail] -= c.duration_min
             self.stock[(c.base_id, c.weapon_code)] -= c.qty
             self.tanker -= int(c.needs_aar)
-            group = groups[(c.base_id, c.type_code)]
-            g_pre = max(g.pre_min for g in group)
-            g_dur = max(g.duration_min for g in group)
+            g_pre, g_dur = self.cset.crew_windows[(m.id, c.base_id, c.type_code)]
             self.crew_busy[a.crew_id].append(
                 (a.tot_min - g_pre, a.tot_min - g_pre + g_dur + CREW_MIN_REST_MIN)
             )
             self.crew_duty[a.crew_id] -= g_dur
             self.crew_sorties[a.crew_id] -= 1
+
+
+def _keep_pass(
+    ledger: _Ledger, missions: list[Mission], weights: CoaWeights, previous: list[PreviousPackage]
+) -> list[Assignment]:
+    """Keep each previous package that is still feasible with the same aircraft, crews,
+    loadouts and time on target. Highest priority first, so conflicts favour it."""
+    by_id = {m.id: m for m in missions}
+    kept: list[Assignment] = []
+    for prev in sorted(previous, key=lambda p: -by_id[p.mission_id].priority if p.mission_id in by_id else 0):
+        m = by_id.get(prev.mission_id)
+        if m is None:
+            continue
+        ordered = sorted(
+            (c for c in ledger.cset.by_mission.get(m.id, []) if c.tail in prev.crew_by_tail),
+            key=lambda c: (c.weapon_code != prev.weapon_by_tail.get(c.tail), -candidate_score(c, weights)),
+        )
+        package = ledger.try_package(m, prev.tot_min, ordered, prev.crew_by_tail)
+        if package:
+            ledger.commit(m, package)
+            kept.extend(package)
+    return kept
+
+
+def keep_valid_packages(
+    missions: list[Mission],
+    cset: CandidateSet,
+    commitments: Commitments,
+    weights: CoaWeights,
+    previous: list[PreviousPackage],
+) -> Repair:
+    ledger = _Ledger(cset, commitments)
+    kept = _keep_pass(ledger, missions, weights, previous)
+    done = {a.candidate.mission_id for a in kept}
+    remaining = {mid: cands for mid, cands in cset.by_mission.items() if mid not in done}
+    rest = replace(
+        cset,
+        candidates=[c for cands in remaining.values() for c in cands],
+        by_mission=remaining,
+        aircraft_minutes_left=dict(ledger.aircraft_minutes),
+        crew_duty_left=dict(ledger.crew_duty),
+        crew_sorties_left=dict(ledger.crew_sorties),
+        stock_left=dict(ledger.stock),
+        tanker_capacity=ledger.tanker,
+    )
+    busy = Commitments()
+    for tail, intervals in ledger.aircraft_busy.items():
+        busy.aircraft_busy[tail].extend(intervals)
+    for crew, intervals in ledger.crew_busy.items():
+        busy.crew_busy[crew].extend(intervals)
+    return Repair(kept=kept, missions=[m for m in missions if m.id not in done], cset=rest, commitments=busy)
 
 
 def greedy_plan(
@@ -120,24 +172,8 @@ def greedy_plan(
     previous: list[PreviousPackage],
 ) -> list[Assignment]:
     ledger = _Ledger(cset, commitments)
-    by_id = {m.id: m for m in missions}
-    done: set[str] = set()
-    out: list[Assignment] = []
-
-    # First keep every previous package that is still feasible exactly as planned.
-    for prev in sorted(previous, key=lambda p: -by_id[p.mission_id].priority if p.mission_id in by_id else 0):
-        m = by_id.get(prev.mission_id)
-        if m is None:
-            continue
-        ordered = sorted(
-            (c for c in cset.by_mission.get(m.id, []) if c.tail in prev.crew_by_tail),
-            key=lambda c: -candidate_score(c, weights),
-        )
-        package = ledger.try_package(m, prev.tot_min, ordered, prev.crew_by_tail)
-        if package:
-            ledger.commit(m, package)
-            out.extend(package)
-            done.add(m.id)
+    out = _keep_pass(ledger, missions, weights, previous)
+    done = {a.candidate.mission_id for a in out}
 
     # Then fill the remaining missions in priority order at the earliest feasible time.
     for m in sorted(missions, key=lambda m: -m.priority):

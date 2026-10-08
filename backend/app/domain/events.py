@@ -9,7 +9,9 @@ from app.domain.enums import BaseStatus, TargetClass, WeatherCondition
 from app.domain.models import Priority, Probability, RadiusKm
 
 ShortText = Annotated[str, Field(min_length=1, max_length=80)]
-IdList = Annotated[list[Annotated[str, Field(min_length=1, max_length=20)]], Field(min_length=1, max_length=12)]
+IdList = Annotated[
+    list[Annotated[str, Field(min_length=1, max_length=20)]], Field(min_length=1, max_length=12)
+]
 
 
 class AircraftUnserviceableEvent(BaseModel):

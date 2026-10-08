@@ -2,6 +2,7 @@
 
 import math
 from collections.abc import Sequence
+from itertools import pairwise
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -26,7 +27,7 @@ def in_circle(p: Point, centre: Point, radius_km: float) -> bool:
 
 
 def polyline_length_km(points: Sequence[Point]) -> float:
-    return sum(distance_km(a, b) for a, b in zip(points, points[1:], strict=False))
+    return sum(distance_km(a, b) for a, b in pairwise(points))
 
 
 def point_along(points: Sequence[Point], fraction: float) -> Point:
@@ -34,7 +35,7 @@ def point_along(points: Sequence[Point], fraction: float) -> Point:
     total = polyline_length_km(points)
     target = total * min(max(fraction, 0.0), 1.0)
     walked = 0.0
-    for a, b in zip(points, points[1:], strict=False):
+    for a, b in pairwise(points):
         seg = distance_km(a, b)
         if walked + seg >= target and seg > 0:
             t = (target - walked) / seg
@@ -45,7 +46,7 @@ def point_along(points: Sequence[Point], fraction: float) -> Point:
 
 def x_on_border(border: Sequence[Point], y_km: float) -> float:
     """Border x at a given y, by linear interpolation along the border polyline."""
-    for a, b in zip(border, border[1:], strict=False):
+    for a, b in pairwise(border):
         lo, hi = sorted((a.y_km, b.y_km))
         if lo <= y_km <= hi and hi > lo:
             t = (y_km - a.y_km) / (b.y_km - a.y_km)

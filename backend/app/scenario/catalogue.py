@@ -18,8 +18,16 @@ WEAPONS: list[Weapon] = [
         standoff_km=150.0,
         needs_clear_weather=False,
         scarcity=12.0,  # few rounds held theatre-wide; expend only on high-value targets
-        pk={T.AIRFIELD: 0.6, T.RADAR: 0.8, T.SAM: 0.7, T.BRIDGE: 0.75, T.DEPOT: 0.85,
-            T.COMMAND: 0.85, T.ARMOUR: 0.2, T.MOBILE: 0.3},
+        pk={
+            T.AIRFIELD: 0.6,
+            T.RADAR: 0.8,
+            T.SAM: 0.7,
+            T.BRIDGE: 0.75,
+            T.DEPOT: 0.85,
+            T.COMMAND: 0.85,
+            T.ARMOUR: 0.2,
+            T.MOBILE: 0.3,
+        },
     ),
     Weapon(
         code="LGB",
@@ -28,8 +36,16 @@ WEAPONS: list[Weapon] = [
         standoff_km=10.0,
         needs_clear_weather=True,
         scarcity=1.5,
-        pk={T.AIRFIELD: 0.55, T.RADAR: 0.7, T.SAM: 0.6, T.BRIDGE: 0.8, T.DEPOT: 0.75,
-            T.COMMAND: 0.7, T.ARMOUR: 0.55, T.MOBILE: 0.6},
+        pk={
+            T.AIRFIELD: 0.55,
+            T.RADAR: 0.7,
+            T.SAM: 0.6,
+            T.BRIDGE: 0.8,
+            T.DEPOT: 0.75,
+            T.COMMAND: 0.7,
+            T.ARMOUR: 0.55,
+            T.MOBILE: 0.6,
+        },
     ),
     Weapon(
         code="GPS",
@@ -38,8 +54,16 @@ WEAPONS: list[Weapon] = [
         standoff_km=40.0,
         needs_clear_weather=False,
         scarcity=2.5,
-        pk={T.AIRFIELD: 0.5, T.RADAR: 0.55, T.SAM: 0.5, T.BRIDGE: 0.6, T.DEPOT: 0.65,
-            T.COMMAND: 0.6, T.ARMOUR: 0.25, T.MOBILE: 0.15},
+        pk={
+            T.AIRFIELD: 0.5,
+            T.RADAR: 0.55,
+            T.SAM: 0.5,
+            T.BRIDGE: 0.6,
+            T.DEPOT: 0.65,
+            T.COMMAND: 0.6,
+            T.ARMOUR: 0.25,
+            T.MOBILE: 0.15,
+        },
     ),
     Weapon(
         code="ARM",
@@ -66,8 +90,16 @@ WEAPONS: list[Weapon] = [
         standoff_km=0.0,
         needs_clear_weather=True,  # visual delivery
         scarcity=0.1,
-        pk={T.AIRFIELD: 0.25, T.RADAR: 0.2, T.SAM: 0.15, T.BRIDGE: 0.2, T.DEPOT: 0.3,
-            T.COMMAND: 0.15, T.ARMOUR: 0.35, T.MOBILE: 0.3},
+        pk={
+            T.AIRFIELD: 0.25,
+            T.RADAR: 0.2,
+            T.SAM: 0.15,
+            T.BRIDGE: 0.2,
+            T.DEPOT: 0.3,
+            T.COMMAND: 0.15,
+            T.ARMOUR: 0.35,
+            T.MOBILE: 0.3,
+        },
     ),
 ]
 
@@ -89,9 +121,13 @@ AIRCRAFT_TYPES: list[AircraftType] = [
         air_to_air=0.90,
         turnaround_min=50,
         night_capable=True,
-        loadouts=[Loadout(weapon_code="SOW", quantity=1), Loadout(weapon_code="LGB", quantity=2),
-                  Loadout(weapon_code="GPS", quantity=2), Loadout(weapon_code="ARM", quantity=2),
-                  Loadout(weapon_code="AAM", quantity=6)],
+        loadouts=[
+            Loadout(weapon_code="SOW", quantity=1),
+            Loadout(weapon_code="LGB", quantity=2),
+            Loadout(weapon_code="GPS", quantity=2),
+            Loadout(weapon_code="ARM", quantity=2),
+            Loadout(weapon_code="AAM", quantity=6),
+        ],
     ),
     AircraftType(
         code="MRF",
@@ -103,9 +139,13 @@ AIRCRAFT_TYPES: list[AircraftType] = [
         air_to_air=0.85,
         turnaround_min=60,
         night_capable=True,
-        loadouts=[Loadout(weapon_code="SOW", quantity=1), Loadout(weapon_code="LGB", quantity=2),
-                  Loadout(weapon_code="GPS", quantity=4), Loadout(weapon_code="ARM", quantity=2),
-                  Loadout(weapon_code="AAM", quantity=8)],
+        loadouts=[
+            Loadout(weapon_code="SOW", quantity=1),
+            Loadout(weapon_code="LGB", quantity=2),
+            Loadout(weapon_code="GPS", quantity=4),
+            Loadout(weapon_code="ARM", quantity=2),
+            Loadout(weapon_code="AAM", quantity=8),
+        ],
     ),
     AircraftType(
         code="LCF",
@@ -117,8 +157,11 @@ AIRCRAFT_TYPES: list[AircraftType] = [
         air_to_air=0.75,
         turnaround_min=40,
         night_capable=False,
-        loadouts=[Loadout(weapon_code="GPS", quantity=2), Loadout(weapon_code="UGB", quantity=4),
-                  Loadout(weapon_code="AAM", quantity=4)],
+        loadouts=[
+            Loadout(weapon_code="GPS", quantity=2),
+            Loadout(weapon_code="UGB", quantity=4),
+            Loadout(weapon_code="AAM", quantity=4),
+        ],
     ),
     AircraftType(
         code="DPS",
@@ -130,8 +173,11 @@ AIRCRAFT_TYPES: list[AircraftType] = [
         air_to_air=0.30,
         turnaround_min=70,
         night_capable=True,
-        loadouts=[Loadout(weapon_code="LGB", quantity=2), Loadout(weapon_code="GPS", quantity=2),
-                  Loadout(weapon_code="UGB", quantity=6)],
+        loadouts=[
+            Loadout(weapon_code="LGB", quantity=2),
+            Loadout(weapon_code="GPS", quantity=2),
+            Loadout(weapon_code="UGB", quantity=6),
+        ],
     ),
     AircraftType(
         code="TKR",

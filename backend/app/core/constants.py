@@ -77,7 +77,20 @@ AIRCRAFT_LOSS_COST: Final = 60.0
 # Changing one aircraft's tasking during retasking costs 6 priority points before COA
 # weighting: enough to stop churn for marginal gains, small against any real mission.
 CHANGE_COST: Final = 6.0
-SOLVER_TIME_LIMIT_S: Final = 4.0
+# Per-COA budget. Measured on the demo scenario (4 cores): a lone solve is within 1% of
+# its 8-second objective after 2 seconds. COAs run one after another, not in parallel,
+# because concurrent solves starve each other's worker threads.
+SOLVER_TIME_LIMIT_S: Final = 2.0
+# Presolve probing costs ~1.5 s on this model size for no measurable gain; level 1
+# keeps the cheap probing passes only.
+SOLVER_PROBING_LEVEL: Final = 1
+# Pruning before solving, per COA: the best loadouts per (aircraft, mission) and the
+# best candidates per mission. Six options per aircraft slot leaves the solver ample
+# room to trade assets between missions while keeping the model small.
+LOADOUTS_PER_PAIR: Final = 2
+CANDIDATES_PER_SLOT: Final = 6
+# Time-on-target step the greedy baseline tries within each mission window.
+GREEDY_TOT_STEP_MIN: Final = 5
 SOLVER_WORKERS: Final = 4
 SOLVER_RANDOM_SEED: Final = 7
 SCENARIO_SEED: Final = 26250
